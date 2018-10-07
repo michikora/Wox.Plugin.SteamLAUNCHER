@@ -2,7 +2,9 @@
 from wox import Wox, WoxAPI
 import re
 import difflib
-import os, sys, glob
+import os
+import sys
+import glob
 import subprocess
 import json
 import urllib
@@ -10,84 +12,137 @@ import urllib.request
 import requests
 import codecs
 from bs4 import BeautifulSoup
+import time
 
 
 class Steamlauncher(Wox):
+    def __init__(self):
+        conf = Steamlauncher.load_conf()
+        self.plugin_conf = conf[0]
+        self.steam_dir = conf[1]
+        self.steam_apps_dir = conf[2]
 
-    gameList = []
-    f = codecs.open('./config.json', 'r', 'utf-8')
-    dirConfig = json.load(f)
-    f.close()
+        self.game_list = Steamlauncher.load_steam_library(self.steam_apps_dir)
+        super(Steamlauncher, self).__init__()
 
-    if not dirConfig["steam_dir"]:
-        steamDir = None
-    else:
-        if os.path.isdir(dirConfig['steam_dir']) and os.path.isfile(dirConfig['steam_dir'] + 'steam.exe'):
-            steamDir = dirConfig["steam_dir"]
+    @staticmethod
+    def load_conf():
+        """
+        load configuration and return (steam_dir, steamapps_dir)
+        """
+
+        with codecs.open('./config.json', 'r', 'utf-8') as f:
+            plugin_conf = json.load(f)
+
+        if not plugin_conf["steam_dir"]:
+            steam_dir = None
         else:
-            steamDir = False
+            if os.path.isdir(plugin_conf['steam_dir']) and os.path.isfile(os.path.join(plugin_conf['steam_dir'], 'steam.exe')):
+                steam_dir = plugin_conf["steam_dir"]
+            else:
+                steam_dir = False
 
-    if not dirConfig["steamapps_dir"]:
-        steamappsDir = None
-    else:
-        if os.path.isdir(dirConfig['steamapps_dir']) and not not glob.glob(dirConfig['steamapps_dir'] + 'appmanifest_*.acf'):
-            steamappsDir = dirConfig["steamapps_dir"]
-            acfList = glob.glob(dirConfig['steamapps_dir'] + 'appmanifest_*.acf')
-            for line in acfList:
-                gameId = re.search(r"[0-9]+.acf", line)
-                gameId = gameId.group().strip(".acf")
-                f = codecs.open(line, 'r', 'utf-8')
-                for line in f:
-                    if line.find("name") >= 0:
-                        gameTitle = line.strip('\n')
-                        gameTitle = gameTitle[9:].strip('"')
-                        break
-                f.close()
-                if os.path.isfile('./icon/' + gameId + '.jpg'):
-                    gameIcon = './icon/'+ gameId + '.jpg'
-                else:
-                    try:
-                        url = 'https://steamdb.info/app/{}/'.format(gameId)
-                        headers = {"User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:47.0) Gecko/20100101 Firefox/47.0"}
-                        r = requests.get(url, headers=headers)
-                        soup = BeautifulSoup(r.text, "html.parser")
-                        data = soup.find('img', attrs={'class':'app-icon avatar'})
-                        img = data.attrs['src']
-                        urllib.request.urlretrieve(img, './icon/' + gameId + '.jpg')
-                        gameIcon = './icon/'+ gameId + '.jpg'
-                    except Exception as e:
-                        gameIcon = './icon/missing.png'
-                gameList.append({'gameId':gameId, 'gameTitle':gameTitle, 'gameIcon':gameIcon})
-
+        if not plugin_conf["steamapps_dir"]:
+            steam_apps_dir = None
+        elif not os.path.isdir(plugin_conf['steamapps_dir']):
+            steam_apps_dir = False
         else:
-            steamappsDir = False
+            steam_apps_dir = plugin_conf["steamapps_dir"]
+
+        return plugin_conf, steam_dir, steam_apps_dir
+
+    @staticmethod
+    def load_steam_library(steam_apps_dir):
+        game_list = []
+        if os.path.exists('./cache.json'):
+            with codecs.open('./cache.json', 'r', 'utf-8') as f:
+                game_list = json.load(f)
+        else:
+            game_list = Steamlauncher.save_steam_library(steam_apps_dir)
+        return game_list
+
+    @staticmethod
+    def save_steam_library(steam_apps_dir):
+        game_list = Steamlauncher.query_steam_library(steam_apps_dir)
+        with codecs.open('./cache.json', 'w', 'utf-8') as f:
+            json.dump(game_list, f, indent=4)
+        return game_list
+
+    @staticmethod
+    def query_steam_library(steam_apps_dir):
+        """
+        Load steam library from the steam apps dir.
+        return None if the steam apps dir is invalid. Otherwise return list of: {gameid, gameTitle, gameIcon}
+        """
+        if steam_apps_dir and os.path.isdir(steam_apps_dir):
+            game_list = []
+            acf_list = glob.glob(os.path.join(
+                steam_apps_dir, 'appmanifest_*.acf'))
+            if not acf_list:
+                return
+
+            for acf_file in acf_list:
+                game_id = re.search(r"[0-9]+.acf", acf_file)
+                game_id = game_id.group().strip(".acf")
+                with codecs.open(acf_file, 'r', 'utf-8') as f:
+                    for line in f:
+                        if line.find("name") >= 0:
+                            game_title = line.strip('\n')
+                            game_title = game_title[9:].strip('"')
+                            break
+
+                game_icon_path = os.path.join('./icon/', game_id + '.jpg')
+                if not os.path.isfile(game_icon_path):
+                    game_icon_path = Steamlauncher.get_game_icon(game_id)
+
+                game_list.append(
+                    {'gameId': game_id, 'gameTitle': game_title, 'gameIcon': game_icon_path})
+        return game_list
+
+    @staticmethod
+    def get_game_icon(game_id):
+        """
+        Download and return the game icon for game_id
+        """
+        try:
+            url = 'https://steamdb.info/app/{}/'.format(game_id)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:47.0) Gecko/20100101 Firefox/47.0"}
+            r = requests.get(url, headers=headers)
+            soup = BeautifulSoup(r.text, "html.parser")
+            data = soup.find('img', attrs={'class': 'app-icon avatar'})
+            img = data.attrs['src']
+            urllib.request.urlretrieve(img, './icon/' + game_id + '.jpg')
+            return os.path.join('./icon/', game_id + '.jpg')
+        except Exception:
+            return './icon/missing.png'
 
     def query(self, query):
         result = []
-        steamDir = self.steamDir
-        steamappsDir = self.steamappsDir
-        gameList = self.gameList
+        steamDir = self.steam_dir
+        steamappsDir = self.steam_apps_dir
+        gameList = self.game_list
 
-        if not query and steamDir is not (None and False) and steamappsDir is not (None and False):
-            for line in gameList:
-                result.append({
-                    "Title": line['gameTitle'] + " - ({})".format(line['gameId']),
-                    "SubTitle": "Press Enter key to launch '{}'.".format(line['gameTitle']),
-                    "IcoPath": line['gameIcon'],
-                    "JsonRPCAction": {
-                        "method": "launchGame",
-                        "parameters": [line['gameId']],
-                        "dontHideAfterAction": False
-                    }
-                })
-            return result
+        search_query = query.upper()
 
-        if steamDir is not (None and False) and steamappsDir is not (None and False):
+        if steamappsDir and search_query in '/STEAM':
+            result.append({
+                "Title": "Reload steam library",
+                "SubTitle": "Press enter to reload the steam library to the plugin",
+                "IcoPath": 'icon/launcher.png',
+                "JsonRPCAction": {
+                    "method": "reloadLibrary",
+                    "parameters": [steamappsDir],
+                    "dontHideAfterAction": True
+                }
+            })
+
+        if steamDir and steamappsDir:
             for line in gameList:
-                if re.match(query.upper(), line['gameTitle'].upper()) or difflib.SequenceMatcher(None, query.upper(), line['gameTitle'].upper()).ratio() > 0.35:
+                if search_query in line['gameTitle'].upper():
                     result.append({
-                        "Title": line['gameTitle'] + " - ({})".format(line['gameId']),
-                        "SubTitle": "Press Enter key to launch '{}'.".format(line['gameTitle']),
+                        "Title": line['gameTitle'],
+                        "SubTitle": str(line['gameId']),
                         "IcoPath": line['gameIcon'],
                         "JsonRPCAction": {
                             "method": "launchGame",
@@ -95,12 +150,6 @@ class Steamlauncher(Wox):
                             "dontHideAfterAction": False
                         }
                     })
-            if not result:
-                result.append({
-                    "Title": "Can't find '{}'.".format(query),
-                    "SubTitle": "Please check game has been installed correctly.",
-                    "IcoPath": "icon/launcher.png",
-                })
             return result
 
         if steamDir is None:
@@ -153,24 +202,33 @@ class Steamlauncher(Wox):
         return result
 
     def saveSteamDirectory(self, path):
-        dirConfig = self.dirConfig
-        dirConfig['steam_dir'] = re.sub(r'[/\\]+', '/', path.rstrip('/\\')) + '/'
-        f = codecs.open('./config.json', 'w', 'utf-8')
-        json.dump(dirConfig, f, indent=4)
-        f.close()
-        WoxAPI.show_msg("Steam directory path has been saved", dirConfig['steam_dir'])
+        plugin_conf = self.plugin_conf
+        plugin_conf['steam_dir'] = re.sub(
+            r'[/\\]+', '/', path.rstrip('/\\')) + '/'
+        self.steam_dir = plugin_conf['steam_dir']
+        with codecs.open('./config.json', 'w', 'utf-8') as f:
+            json.dump(plugin_conf, f, indent=4)
+        WoxAPI.show_msg("Steam directory path has been saved",
+                        plugin_conf['steam_dir'])
 
     def saveSteamAppsDirectory(self, path):
-        dirConfig = self.dirConfig
-        dirConfig['steamapps_dir'] = re.sub(r'[/\\]+', '/', path.rstrip('/\\')) + '/'
-        f = codecs.open('./config.json', 'w', 'utf-8')
-        json.dump(dirConfig, f, indent=4)
-        f.close()
-        WoxAPI.show_msg("Steam apps directory path has been saved", dirConfig['steamapps_dir'])
+        plugin_conf = self.plugin_conf
+        plugin_conf['steamapps_dir'] = re.sub(
+            r'[/\\]+', '/', path.rstrip('/\\')) + '/'
+        self.steam_apps_dir = plugin_conf['steamapps_dir']
+        with codecs.open('./config.json', 'w', 'utf-8') as f:
+            json.dump(plugin_conf, f, indent=4)
+        WoxAPI.show_msg("Steam apps directory path has been saved",
+                        plugin_conf['steamapps_dir'])
 
-    def launchGame(self, gameId):
-        steamDir = self.steamDir
-        subprocess.Popen(['{}steam.exe'.format(steamDir), '-applaunch', gameId])
+    def reloadLibrary(self, steam_apps_dir):
+        self.game_list = Steamlauncher.save_steam_library(steam_apps_dir)
+        WoxAPI.show_msg("Steam library has been updated", steam_apps_dir)
+
+    def launchGame(self, game_id):
+        subprocess.Popen(['{}steam.exe'.format(
+            self.steam_dir), '-applaunch', game_id])
+
 
 if __name__ == "__main__":
     Steamlauncher()
